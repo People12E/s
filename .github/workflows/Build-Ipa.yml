@@ -1,0 +1,76 @@
+name: Build unsigned IPA
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode 15.4
+        run: sudo xcode-select -s /Applications/Xcode_15.4.app
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+          xcrun -sdk iphoneos metal --version || true
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build (unsigned, device SDK)
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project MotionForge.xcodeproj \
+            -scheme MotionForge \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            build 2>&1 | tee build.log
+
+      - name: Package .ipa
+        run: |
+          APP=$(find build/Build/Products -maxdepth 2 -name "MotionForge.app" | head -n 1)
+          echo "App bundle: $APP"
+          test -f "$APP/MotionForge" || { echo "Compiled executable missing"; exit 1; }
+          test -f "$APP/default.metallib" || { echo "Metal library missing"; exit 1; }
+          rm -rf Payload && mkdir Payload
+          cp -R "$APP" Payload/
+          rm -rf Payload/MotionForge.app/_CodeSignature
+          zip -qry MotionForge-unsigned.ipa Payload
+          cp MotionForge-unsigned.ipa MotionForge-unsigned.tipa   # same file; TrollStore expects .tipa
+          echo "--- archive top level ---"; unzip -Z1 MotionForge-unsigned.ipa | head -n 8
+          ls -lh MotionForge-unsigned.ipa
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: MotionForge-unsigned-ipa
+          path: |
+            MotionForge-unsigned.ipa
+            MotionForge-unsigned.tipa
+
+      - name: Upload Payload folder (the raw .app, for tools that want it unzipped)
+        uses: actions/upload-artifact@v4
+        with:
+          name: Payload
+          path: Payload/
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
